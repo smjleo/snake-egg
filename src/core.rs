@@ -192,8 +192,7 @@ impl PyEGraph {
             .collect()
     }
 }
-
-fn reconstruct(py: Python, recexpr: &RecExpr<PythonNode>) -> PyObject {
+pub(crate) fn reconstruct(py: Python, recexpr: &RecExpr<PythonNode>) -> PyObject {
     let mut objs = Vec::<PyObject>::with_capacity(recexpr.as_ref().len());
     for node in recexpr.as_ref() {
         let obj = node.to_object(py, |id| objs[usize::from(id)].clone());

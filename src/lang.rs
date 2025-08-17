@@ -1,4 +1,4 @@
-use egg::{Analysis, Applier, DidMerge, EGraph, PatternAst, Subst, Symbol};
+use egg::{Analysis, Applier, DidMerge, EGraph, PatternAst, Subst, Symbol, Extractor, AstSize};
 use egg::{Id, Language, Var};
 use once_cell::sync::Lazy;
 use pyo3::AsPyPointer;
@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::{fmt::Display, hash::Hash};
 
 use crate::util::{build_node, py_eq};
-use crate::core::PyPattern;
+use crate::core::{PyPattern, reconstruct};
 
 struct PythonHashable {
     obj: PyObject,
@@ -224,15 +224,18 @@ impl Applier<PythonNode, PythonAnalysis> for PythonApplier {
         let py = unsafe { Python::assume_gil_acquired() };
         let kwargs = PyDict::new(py);
 
-        for var in &self.vars {
-            let id = subst[*var];
-            let obj = if let Some(data) = egraph[id].data.clone() {
-                data
-            } else {
-                py.None()
-            };
-            let key = &var.to_string()[1..];
-            kwargs.set_item(key, obj).unwrap();
+        // reconstruct Python objects for each matched variable using the
+        // best expression frEm the e-graph. before, it just pulled the
+        // analysis data (None by default for dynamic rules)
+        {
+            let extractor = Extractor::new(&*egraph, AstSize);
+            for var in &self.vars {
+                let id = subst[*var];
+                let (_cost, expr) = extractor.find_best(id);
+                let obj = reconstruct(py, &expr);
+                let key = &var.to_string()[1..];
+                kwargs.set_item(key, obj).unwrap();
+            }
         }
 
         let result = self.eval.as_ref(py).call((), Some(kwargs)).unwrap();

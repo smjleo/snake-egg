@@ -99,18 +99,12 @@ list_rules: List[List[Any]] = [
   ["d-sin",  Diff(x, Sin(x)),  Cos(x)],
   ["d-cos",  Diff(x, Cos(x)),  Mul(-1, Sin(x))],
 
-  # rw!("d-ln"; "(d ?x (ln ?x))" => "(/ 1 ?x)" if is_not_zero("?x")),
-
-  # rw!("d-power";
-  #     "(d ?x (pow ?f ?g))" =>
-  #     "(* (pow ?f ?g)
-  #         (+ (* (d ?x ?f)
-  #               (/ ?g ?f))
-  #            (* (d ?x ?g)
-  #               (ln ?f))))"
-  #     if is_not_zero("?f")
-  #     if is_not_zero("?g")
-  # ),
+  ["d-variable", Diff(x, x), 1],
+  ["d-const", Diff(x, f), lambda x, f: 0 if (isinstance(f, (int, float, str)) and f != x) else Diff(x, f)],
+  ["d-ln", Diff(x, Ln(f)), lambda x, f: Div(Diff(x, f), f)],
+  ["d-pow", Diff(x, Pow(f, g)),
+   lambda x, f, g: Mul(g, Pow(f, Add(g, -1))) if f == x and isinstance(g, (int, float))
+   else Diff(x, Pow(f, g))],
 
   ["i-one",    Integral(1, x),          x],
   # rw!("i-power-const"; "(i (pow ?x ?c) ?x)" =>
@@ -182,40 +176,40 @@ def test_math_simplify_factor():
     expr_b = Add(Add(Mul(x, x), Mul(4, x)), 3)
     assert is_equal(expr_a, expr_b)
 
-# def test_math_diff_same():
-#     expr_a = diff(x, x)
-#     expr_b = 1
-#     assert is_equal(expr_a, expr_b)
+def test_math_diff_same():
+    expr_a = Diff(x, x)
+    expr_b = 1
+    assert is_equal(expr_a, expr_b)
 
-# def test_math_diff_different():
-#     expr_a = diff(x, y)
-#     expr_b = 0
-#     assert is_equal(expr_a, expr_b)
 
-# def test_math_diff_simple1():
-#     expr_a = diff(x, add(1, mul(2, x)))
-#     expr_b = 2
-#     assert is_equal(expr_a, expr_b)
+def test_math_diff_different():
+    expr_a = Diff(x, y)
+    expr_b = 0
+    assert is_equal(expr_a, expr_b)
 
-# def test_math_diff_simple2():
-#     expr_a = diff(x, add(1, mul(y, x)))
-#     expr_b = y
-#     assert is_equal(expr_a, expr_b)
 
-# def test_math_diff_ln():
-#     expr_a = diff(x, ln(x))
-#     expr_b = div(1, x)
-#     assert is_equal(expr_a, expr_b)
+def test_math_diff_simple1():
+    expr_a = Diff(x, Add(1, Mul(2, x)))
+    expr_b = 2
+    assert is_equal(expr_a, expr_b)
 
-# def test_diff_power_simple():
-#     expr_a = diff(x, pow(x, 3))
-#     expr_b = mul(3, pow(x, 2))
-#     assert is_equal(expr_a, expr_b)
 
-# def test_diff_power_harder():
-#     expr_a = diff(x, sub(pow(x, 3), mul(7, pow(x, 2))))
-#     expr_b = mul(x, sub(mul(3, x), 14))
-#     assert is_equal(expr_a, expr_b)
+def test_math_diff_simple2():
+    expr_a = Diff(x, Add(1, Mul(y, x)))
+    expr_b = y
+    assert is_equal(expr_a, expr_b)
+
+
+def test_math_diff_ln():
+    expr_a = Diff(x, Ln(x))
+    expr_b = Div(1, x)
+    assert is_equal(expr_a, expr_b)
+
+
+def test_diff_power_simple():
+    expr_a = Diff(x, Pow(x, 3))
+    expr_b = Mul(3, Pow(x, 2))
+    assert is_equal(expr_a, expr_b)
 
 def test_integ_one():
     expr_a = Integral(1, x)
