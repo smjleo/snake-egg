@@ -79,11 +79,26 @@ impl PythonNode {
 
     pub fn to_object<T: IntoPy<PyObject>>(&self, py: Python, f: impl FnMut(Id) -> T) -> PyObject {
         if self.is_leaf() {
-            self.class.clone()
+            // Special case: if this is a tuple type, create an empty tuple
+            let tuple_type = py.get_type::<PyTuple>();
+            if self.class.is(tuple_type) {
+                PyTuple::empty(py).into()
+            } else {
+                self.class.clone()
+            }
         } else {
-            let children = self.children.iter().copied().map(f);
-            let args = PyTuple::new(py, children.map(|o| o.into_py(py)));
-            self.class.call1(py, args).expect("Failed to construct")
+            let children: Vec<PyObject> = self.children.iter().copied().map(f).map(|o| o.into_py(py)).collect();
+            
+            // Check if this is the built-in tuple type constructor
+            let tuple_type = py.get_type::<PyTuple>();
+            if self.class.is(tuple_type) {
+                // For tuple type, directly create a tuple from children
+                PyTuple::new(py, children).into()
+            } else {
+                // For other types (like NamedTuples), call constructor with unpacked arguments
+                let args = PyTuple::new(py, children);
+                self.class.call(py, args, None).expect("Failed to construct")
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-use egg::{AstSize, EGraph, Extractor, Id, Pattern, PatternAst, RecExpr, Rewrite, Runner, Var};
+use egg::{AstSize, EGraph, Extractor, Id, Language, Pattern, PatternAst, RecExpr, Rewrite, Runner, Var};
 use pyo3::types::{PyList, PyString, PyTuple};
 use pyo3::{basic::CompareOp, prelude::*};
 
@@ -190,6 +190,12 @@ impl PyEGraph {
                 reconstruct(py, &recexpr)
             })
             .collect()
+    }
+
+    fn dump(&self) -> PyResult<()> {
+        let dump = self.egraph.dump();
+        println!("{:?}", dump);
+        Ok(())
     }
 }
 pub(crate) fn reconstruct(py: Python, recexpr: &RecExpr<PythonNode>) -> PyObject {

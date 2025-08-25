@@ -47,3 +47,4 @@ def test_simplify_add():
     assert simplify(Add(1, 2)) == 3
     assert simplify(Add(1, Add("x", "y"))) == Add(1, Add("x", "y"))
 
+test_simplify_add()
