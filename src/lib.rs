@@ -11,7 +11,7 @@ use pyo3::{prelude::*, types::PyString};
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
 #[pymodule]
-fn _internal(_py: Python, m: &PyModule) -> PyResult<()> {
+fn _internal(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyEGraph>()?;
     m.add_class::<PyId>()?;
     m.add_class::<PyVar>()?;

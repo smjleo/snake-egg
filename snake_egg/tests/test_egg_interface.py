@@ -2,10 +2,9 @@
 
 # This is a reimplementation of simple.rs from the Rust egg repository
 
-from dataclasses import dataclass
 from typing import Any
 
-from snake_egg import EGraph, Rewrite, Var, vars
+from snake_egg import EGraph, Rewrite, vars
 
 
 # Operations

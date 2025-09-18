@@ -10,7 +10,6 @@ We can replace addition nodes with the result, if both values are numbers.
 """
 from __future__ import annotations
 
-from collections import namedtuple
 from typing import List, NamedTuple, Union, cast
 
 from snake_egg import EGraph, Rewrite, Var, vars

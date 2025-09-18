@@ -1,18 +1,18 @@
-use egg::{Analysis, Applier, DidMerge, EGraph, PatternAst, Subst, Symbol, Extractor, AstSize};
+use egg::{Analysis, Applier, AstSize, DidMerge, EGraph, Extractor, PatternAst, Subst, Symbol};
 use egg::{Id, Language, Var};
 use once_cell::sync::Lazy;
 use pyo3::AsPyPointer;
 use pyo3::{
     basic::CompareOp,
     prelude::*,
-    types::{PyTuple, PyType, PyDict},
+    types::{PyDict, PyTuple, PyType},
 };
 use std::cmp::Ordering;
 use std::sync::Mutex;
 use std::{fmt::Display, hash::Hash};
 
+use crate::core::{reconstruct, PyPattern};
 use crate::util::{build_node, py_eq};
-use crate::core::{PyPattern, reconstruct};
 
 struct PythonHashable {
     obj: PyObject,
@@ -87,8 +87,14 @@ impl PythonNode {
                 self.class.clone()
             }
         } else {
-            let children: Vec<PyObject> = self.children.iter().copied().map(f).map(|o| o.into_py(py)).collect();
-            
+            let children: Vec<PyObject> = self
+                .children
+                .iter()
+                .copied()
+                .map(f)
+                .map(|o| o.into_py(py))
+                .collect();
+
             // Check if this is the built-in tuple type constructor
             let tuple_type = py.get_type::<PyTuple>();
             if self.class.is(tuple_type) {
@@ -97,7 +103,9 @@ impl PythonNode {
             } else {
                 // For other types (like NamedTuples), call constructor with unpacked arguments
                 let args = PyTuple::new(py, children);
-                self.class.call(py, args, None).expect("Failed to construct")
+                self.class
+                    .call(py, args, None)
+                    .expect("Failed to construct")
             }
         }
     }
@@ -227,7 +235,6 @@ pub struct PythonApplier {
 }
 
 impl Applier<PythonNode, PythonAnalysis> for PythonApplier {
-
     fn apply_one(
         &self,
         egraph: &mut EGraph<PythonNode, PythonAnalysis>,
@@ -255,7 +262,8 @@ impl Applier<PythonNode, PythonAnalysis> for PythonApplier {
 
         let result = self.eval.as_ref(py).call((), Some(kwargs)).unwrap();
         let pattern = result.extract::<PyPattern>().unwrap();
-        pattern.pattern.apply_one(egraph, eclass, subst, searcher_ast, rule_name)
-
+        pattern
+            .pattern
+            .apply_one(egraph, eclass, subst, searcher_ast, rule_name)
     }
 }

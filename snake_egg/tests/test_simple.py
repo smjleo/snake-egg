@@ -2,10 +2,9 @@
 
 # This is a reimplementation of simple.rs from the Rust egg repository
 
-from collections import namedtuple
 from typing import Any, NamedTuple
 
-from snake_egg import EGraph, Rewrite, Var, vars
+from snake_egg import EGraph, Rewrite, vars
 
 
 # Operations

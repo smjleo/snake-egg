@@ -5,12 +5,14 @@ dependencies = ["typing-extensions"]
 
 [project]
 name = "snake-egg"
+version = "0.0.1"
 requires-python = '>=3.7'
 
 [tool.isort]
 profile = "black"
 
 [tool.maturin]
+module-name = "snake_egg._internal"
 sdist-include = ["Cargo.lock"]
 
 [project.optional-dependencies]

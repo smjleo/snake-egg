@@ -1,4 +1,6 @@
-use egg::{AstSize, EGraph, Extractor, Id, Language, Pattern, PatternAst, RecExpr, Rewrite, Runner, Var};
+use egg::{
+    AstSize, EGraph, Extractor, Id, Language, Pattern, PatternAst, RecExpr, Rewrite, Runner, Var,
+};
 use pyo3::types::{PyList, PyString, PyTuple};
 use pyo3::{basic::CompareOp, prelude::*};
 
@@ -196,6 +198,41 @@ impl PyEGraph {
         let dump = self.egraph.dump();
         println!("{:?}", dump);
         Ok(())
+    }
+
+    fn pretty_dump(&self, py: Python) -> PyResult<String> {
+        use egg::{AstSize, Extractor, Id};
+        let extractor = Extractor::new(&self.egraph, AstSize);
+        let mut out = String::new();
+
+        // Iterate over classes; classes() yields &EClass
+        for eclass in self.egraph.classes() {
+            let id: Id = eclass.id;
+            out.push_str(&format!("{}: [", usize::from(id)));
+            let mut first = true;
+
+            for node in &eclass.nodes {
+                if !first {
+                    out.push_str(", ");
+                }
+                first = false;
+
+                // Reconstruct children via the best representative for each child Id
+                let obj = node.to_object(py, |child_id: Id| {
+                    let (_cost, expr) = extractor.find_best(child_id);
+                    reconstruct(py, &expr)
+                });
+
+                // Prefer repr() for more detail; fallback to str()
+                let any = obj.as_ref(py);
+                let repr = any.repr().unwrap_or_else(|_| any.str().unwrap());
+                out.push_str(repr.to_str().unwrap_or("<?>"));
+            }
+
+            out.push_str("]\n");
+        }
+
+        Ok(out)
     }
 }
 pub(crate) fn reconstruct(py: Python, recexpr: &RecExpr<PythonNode>) -> PyObject {
