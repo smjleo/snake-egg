@@ -199,13 +199,19 @@ impl PyEGraph {
         println!("{:?}", dump);
         Ok(())
     }
-
     fn pretty_dump(&self, py: Python) -> PyResult<String> {
         use egg::{AstSize, Extractor, Id};
+        use pyo3::types::{PyString, PyTuple};
+
         let extractor = Extractor::new(&self.egraph, AstSize);
         let mut out = String::new();
 
-        // Iterate over classes; classes() yields &EClass
+        // Helper: reconstruct child id minimally
+        let reconstruct_child = |child_id: Id| {
+            let (_cost, expr) = extractor.find_best(child_id);
+            reconstruct(py, &expr)
+        };
+
         for eclass in self.egraph.classes() {
             let id: Id = eclass.id;
             out.push_str(&format!("{}: [", usize::from(id)));
@@ -217,22 +223,209 @@ impl PyEGraph {
                 }
                 first = false;
 
-                // Reconstruct children via the best representative for each child Id
-                let obj = node.to_object(py, |child_id: Id| {
-                    let (_cost, expr) = extractor.find_best(child_id);
-                    reconstruct(py, &expr)
-                });
+                // Default label: class name + arity
+                let mut label = {
+                    let class_str = match node.class.as_ref(py).str() {
+                        Ok(s) => s.to_str().unwrap_or("<?>").to_string(),
+                        Err(_) => "<class>".to_string(),
+                    };
+                    format!("{}(children={})", class_str, node.children.len())
+                };
 
-                // Prefer repr() for more detail; fallback to str()
-                let any = obj.as_ref(py);
-                let repr = any.repr().unwrap_or_else(|_| any.str().unwrap());
-                out.push_str(repr.to_str().unwrap_or("<?>"));
+                // Heuristic for detective.ir.Operation (5 fields: name,args,regions,attributes,result_types)
+                if node.children.len() == 5 {
+                    let name_obj = reconstruct_child(node.children[0]);
+                    // Extract string for op name if possible
+                    let name_s = name_obj
+                        .cast_as::<PyString>(py)
+                        .ok()
+                        .map(|s| s.to_str().unwrap_or("<?>").to_string())
+                        .unwrap_or_else(|| {
+                            // fallback to str(name_obj)
+                            name_obj
+                                .as_ref(py)
+                                .str()
+                                .map(|s| s.to_str().unwrap_or("<?>").to_string())
+                                .unwrap_or_else(|_| "<?>".to_string())
+                        });
+
+                    // lengths: args (tuple), regions (tuple), attributes (tuple), result_types (tuple)
+                    let tuple_len = |child_id: Id| -> Option<usize> {
+                        let obj = reconstruct_child(child_id);
+                        obj.cast_as::<PyTuple>(py).ok().map(|t| t.len())
+                    };
+                    let args_len = tuple_len(node.children[1]).unwrap_or(0);
+                    let regions_len = tuple_len(node.children[2]).unwrap_or(0);
+                    let attrs_len = tuple_len(node.children[3]).unwrap_or(0);
+                    let results_len = tuple_len(node.children[4]).unwrap_or(0);
+
+                    label = format!(
+                        "Operation(name='{}', args={}, regions={}, attrs={}, results={})",
+                        name_s, args_len, regions_len, attrs_len, results_len
+                    );
+                } else if node.children.len() == 3 {
+                    // Heuristic: linalg/yield or arith ops often appear as 3-field NamedTuples (for region payloads).
+                    // We can limit to op name only to avoid value explosions.
+                    // Attempt to reconstruct first child (name-like) if it's a string.
+                    let maybe_name = {
+                        let obj = reconstruct_child(node.children[0]);
+                        obj.cast_as::<PyString>(py)
+                            .ok()
+                            .map(|s| s.to_str().unwrap_or("<?>").to_string())
+                    };
+                    if let Some(name_s) = maybe_name {
+                        label = format!("{}(children={})", name_s, node.children.len());
+                    }
+                }
+
+                out.push_str(&label);
             }
-
             out.push_str("]\n");
         }
-
         Ok(out)
+    }
+    // fn pretty_dump(&self, py: Python) -> PyResult<String> {
+    //     use egg::{AstSize, Extractor, Id};
+    //     let extractor = Extractor::new(&self.egraph, AstSize);
+    //     let mut out = String::new();
+
+    //     // Iterate over classes; classes() yields &EClass
+    //     for eclass in self.egraph.classes() {
+    //         let id: Id = eclass.id;
+    //         out.push_str(&format!("{}: [", usize::from(id)));
+    //         let mut first = true;
+
+    //         for node in &eclass.nodes {
+    //             if !first {
+    //                 out.push_str(", ");
+    //             }
+    //             first = false;
+
+    //             // Reconstruct children via the best representative for each child Id
+    //             let obj = node.to_object(py, |child_id: Id| {
+    //                 let (_cost, expr) = extractor.find_best(child_id);
+    //                 reconstruct(py, &expr)
+    //             });
+
+    //             // Prefer repr() for more detail; fallback to str()
+    //             let any = obj.as_ref(py);
+    //             let repr = any.repr().unwrap_or_else(|_| any.str().unwrap());
+    //             out.push_str(repr.to_str().unwrap_or("<?>"));
+    //         }
+
+    //         out.push_str("]\n");
+    //     }
+
+    //     Ok(out)
+    // }
+
+    /// Return the e-class id for a given expression by adding it (idempotent).
+    fn class_id_for(&mut self, expr: &PyAny) -> PyId {
+        self.add(expr)
+    }
+
+    /// Return compact labels for operations in an e-class.
+    /// ops_only: omit non-operation nodes; include_bodies: summarize linalg.generic body ops.
+    #[args(ops_only = "true", include_bodies = "true")]
+    fn class_ops(
+        &self,
+        py: Python,
+        id: PyId,
+        ops_only: bool,
+        include_bodies: bool,
+    ) -> PyResult<Vec<String>> {
+        use egg::{AstSize, Extractor, Id};
+        use pyo3::types::{PyString, PyTuple};
+
+        let extractor = Extractor::new(&self.egraph, AstSize);
+        let eclass = &self.egraph[id.0];
+        let mut out: Vec<String> = Vec::new();
+
+        let reconstruct_child = |child_id: Id| {
+            let (_cost, expr) = extractor.find_best(child_id);
+            reconstruct(py, &expr)
+        };
+
+        for node in &eclass.nodes {
+            if node.children.len() == 5 {
+                // detective.ir.Operation
+                let name_obj = reconstruct_child(node.children[0]);
+                let name_s = name_obj
+                    .cast_as::<PyString>(py)
+                    .ok()
+                    .map(|s| s.to_str().unwrap_or("<?>").to_string())
+                    .unwrap_or_else(|| name_obj.as_ref(py).str().map(|s| s.to_str().unwrap_or("<?>").to_string()).unwrap_or_else(|_| "<?>".to_string()));
+
+                let tuple_len = |child_id: Id| -> Option<usize> {
+                    let obj = reconstruct_child(child_id);
+                    obj.cast_as::<PyTuple>(py).ok().map(|t| t.len())
+                };
+                let args_len = tuple_len(node.children[1]).unwrap_or(0);
+                let regions_len = tuple_len(node.children[2]).unwrap_or(0);
+                let results_len = tuple_len(node.children[4]).unwrap_or(0);
+
+                if include_bodies && name_s == "linalg.generic" {
+                    // Try to summarize inner body ops as addf/mulf tokens
+                    let mut tokens: Vec<String> = Vec::new();
+                    let regions_obj = reconstruct_child(node.children[2]);
+                    if let Ok(regions_tuple) = regions_obj.cast_as::<PyTuple>(py) {
+                        if let Ok(region_obj) = regions_tuple.get_item(0) {
+                            if let Ok(blocks_obj) = region_obj.getattr("blocks") {
+                                if let Ok(blocks_tuple) = blocks_obj.cast_as::<PyTuple>() {
+                                    if let Ok(block_obj) = blocks_tuple.get_item(0) {
+                                        if let Ok(ops_obj) = block_obj.getattr("ops") {
+                                            if let Ok(ops_tuple) = ops_obj.cast_as::<PyTuple>() {
+                                                for i in 0..ops_tuple.len() {
+                                                    if let Ok(op_obj) = ops_tuple.get_item(i) {
+                                                        if let Ok(n) = op_obj.getattr("name") {
+                                                            if let Ok(s) = n.str() {
+                                                                let t = s.to_str().unwrap_or("");
+                                                                if t.contains("arith.addf") { tokens.push("addf".to_string()); }
+                                                                if t.contains("arith.mulf") { tokens.push("mulf".to_string()); }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tokens.sort();
+                    tokens.dedup();
+                    if tokens.is_empty() {
+                        out.push(format!("linalg.generic(args={}, regions={}, res={})", args_len, regions_len, results_len));
+                    } else {
+                        out.push(format!("linalg.generic{{body: {}}}", tokens.join("+")));
+                    }
+                } else {
+                    out.push(format!("{} (args={}, res={})", name_s, args_len, results_len));
+                }
+            } else if !ops_only {
+                // Fallback compact label
+                let class_str = match node.class.as_ref(py).str() {
+                    Ok(s) => s.to_str().unwrap_or("<?>").to_string(),
+                    Err(_) => "<class>".to_string(),
+                };
+                out.push(format!("{}(children={})", class_str, node.children.len()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Describe an e-class by id with compact operation labels.
+    #[args(ops_only = "true", include_bodies = "true")]
+    fn describe_class(
+        &self,
+        py: Python,
+        id: PyId,
+        ops_only: bool,
+        include_bodies: bool,
+    ) -> PyResult<String> {
+        let labels = self.class_ops(py, id, ops_only, include_bodies)?;
+        Ok(format!("{}: [{}]", usize::from(id.0), labels.join(", ")))
     }
 }
 pub(crate) fn reconstruct(py: Python, recexpr: &RecExpr<PythonNode>) -> PyObject {
