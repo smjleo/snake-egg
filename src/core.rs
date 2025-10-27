@@ -284,40 +284,6 @@ impl PyEGraph {
         }
         Ok(out)
     }
-    // fn pretty_dump(&self, py: Python) -> PyResult<String> {
-    //     use egg::{AstSize, Extractor, Id};
-    //     let extractor = Extractor::new(&self.egraph, AstSize);
-    //     let mut out = String::new();
-
-    //     // Iterate over classes; classes() yields &EClass
-    //     for eclass in self.egraph.classes() {
-    //         let id: Id = eclass.id;
-    //         out.push_str(&format!("{}: [", usize::from(id)));
-    //         let mut first = true;
-
-    //         for node in &eclass.nodes {
-    //             if !first {
-    //                 out.push_str(", ");
-    //             }
-    //             first = false;
-
-    //             // Reconstruct children via the best representative for each child Id
-    //             let obj = node.to_object(py, |child_id: Id| {
-    //                 let (_cost, expr) = extractor.find_best(child_id);
-    //                 reconstruct(py, &expr)
-    //             });
-
-    //             // Prefer repr() for more detail; fallback to str()
-    //             let any = obj.as_ref(py);
-    //             let repr = any.repr().unwrap_or_else(|_| any.str().unwrap());
-    //             out.push_str(repr.to_str().unwrap_or("<?>"));
-    //         }
-
-    //         out.push_str("]\n");
-    //     }
-
-    //     Ok(out)
-    // }
 
     /// Return the e-class id for a given expression by adding it (idempotent).
     fn class_id_for(&mut self, expr: &PyAny) -> PyId {
@@ -412,6 +378,8 @@ impl PyEGraph {
                 out.push(format!("{}(children={})", class_str, node.children.len()));
             }
         }
+        out.sort();
+        out.dedup();
         Ok(out)
     }
 
@@ -426,6 +394,31 @@ impl PyEGraph {
     ) -> PyResult<String> {
         let labels = self.class_ops(py, id, ops_only, include_bodies)?;
         Ok(format!("{}: [{}]", usize::from(id.0), labels.join(", ")))
+    }
+
+    /// Return all current e-class ids.
+    fn class_ids(&self) -> Vec<PyId> {
+        self.egraph
+            .classes()
+            .map(|ec| PyId(ec.id))
+            .collect::<Vec<_>>()
+    }
+
+    /// Reconstruct concrete Python objects for each enode in an e-class
+    fn class_enodes(&self, py: Python, id: PyId) -> PyResult<Vec<PyObject>> {
+        use egg::{AstSize, Extractor, Id};
+        let extractor = Extractor::new(&self.egraph, AstSize);
+        let eclass = &self.egraph[id.0];
+        let reconstruct_child = |child_id: Id| {
+            let (_cost, expr) = extractor.find_best(child_id);
+            reconstruct(py, &expr)
+        };
+        let mut out: Vec<PyObject> = Vec::with_capacity(eclass.nodes.len());
+        for node in &eclass.nodes {
+            let obj = node.to_object(py, |child_id| reconstruct_child(child_id));
+            out.push(obj);
+        }
+        Ok(out)
     }
 }
 pub(crate) fn reconstruct(py: Python, recexpr: &RecExpr<PythonNode>) -> PyObject {
