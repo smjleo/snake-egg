@@ -1,15 +1,17 @@
 use egg::{
     AstSize, EGraph, Extractor, Id, Language, Pattern, PatternAst, RecExpr, Rewrite, Runner, Var,
 };
-use pyo3::types::{PyList, PyString, PyTuple};
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use pyo3::{basic::CompareOp, prelude::*};
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use crate::lang::{PythonAnalysis, PythonApplier, PythonNode};
 use crate::util::{build_node, build_pattern};
+use pyo3::exceptions::PyValueError;
 
 #[pyclass]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -114,6 +116,55 @@ pub struct PyEGraph {
     pub egraph: EGraph<PythonNode, PythonAnalysis>,
 }
 
+#[pyclass]
+pub struct IlpSnapshot {
+    e_m: Vec<Vec<usize>>,
+    h_i: Vec<Vec<usize>>,
+    g_i: Vec<usize>,
+    root_m: usize,
+    costs: Vec<f64>,
+    m_id_map: Vec<Id>,
+    nodes: Vec<PythonNode>,
+}
+
+#[pymethods]
+impl IlpSnapshot {
+    fn ilp_data(&self, py: Python) -> PyObject {
+        let dict = PyDict::new(py);
+        dict.set_item("e_m", nested_vector_to_list(py, &self.e_m)).unwrap();
+        dict.set_item("h_i", nested_vector_to_list(py, &self.h_i)).unwrap();
+        dict.set_item("g_i", vector_to_object(py, &self.g_i)).unwrap();
+        dict.set_item("root_m", self.root_m).unwrap();
+        dict.set_item("cost_i", vector_to_object(py, &self.costs)).unwrap();
+        dict.set_item("blacklist_i", PyList::empty(py)).unwrap();
+        dict.into()
+    }
+
+    fn num_nodes(&self) -> usize {
+        self.nodes.len()
+    }
+}
+
+fn vector_to_object<T: ToPyObject>(py: Python, data: &[T]) -> PyObject {
+    let list = PyList::empty(py);
+    for item in data {
+        list.append(item).unwrap();
+    }
+    list.into()
+}
+
+fn nested_vector_to_list<T: Copy + ToPyObject>(py: Python, data: &[Vec<T>]) -> PyObject {
+    let outer = PyList::empty(py);
+    for row in data {
+        let inner = PyList::empty(py);
+        for val in row {
+            inner.append(*val).unwrap();
+        }
+        outer.append(inner).unwrap();
+    }
+    outer.into()
+}
+
 #[pymethods]
 impl PyEGraph {
     #[new]
@@ -198,6 +249,124 @@ impl PyEGraph {
         let dump = self.egraph.dump();
         println!("{:?}", dump);
         Ok(())
+    }
+
+    fn prepare_ilp_snapshot(
+        &mut self,
+        py: Python,
+        root: PyId,
+        cost_fn: PyObject,
+    ) -> PyResult<Py<IlpSnapshot>> {
+        let extractor = Extractor::new(&self.egraph, AstSize);
+        let m_id_map: Vec<Id> = self
+            .egraph
+            .classes()
+            .map(|c| self.egraph.find(c.id))
+            .collect();
+        let mut id_m_map = HashMap::new();
+        for (idx, id) in m_id_map.iter().enumerate() {
+            id_m_map.insert(*id, idx);
+        }
+
+        let num_classes = m_id_map.len();
+        let mut e_m = vec![Vec::new(); num_classes];
+        let mut h_i: Vec<Vec<usize>> = Vec::new();
+        let mut g_i: Vec<usize> = Vec::new();
+        let mut costs: Vec<f64> = Vec::new();
+        let mut nodes: Vec<PythonNode> = Vec::new();
+        let mut child_cache: HashMap<Id, PyObject> = HashMap::new();
+
+        let root_m = *id_m_map
+            .get(&self.egraph.find(root.0))
+            .ok_or_else(|| PyValueError::new_err("Root eclass not found"))?;
+
+        for class in self.egraph.classes() {
+            let m = *id_m_map.get(&self.egraph.find(class.id)).unwrap();
+            for node in class.iter() {
+                let idx = nodes.len();
+                e_m[m].push(idx);
+                let children: Vec<usize> = node
+                    .children()
+                    .iter()
+                    .map(|id| *id_m_map.get(&self.egraph.find(*id)).unwrap())
+                    .collect();
+                h_i.push(children);
+                g_i.push(m);
+                nodes.push(node.clone());
+
+                let node_py = node.to_object(py, |child_id| {
+                    let canon = self.egraph.find(child_id);
+                    if let Some(obj) = child_cache.get(&canon) {
+                        return obj.clone_ref(py);
+                    }
+                    let (_c, expr) = extractor.find_best(canon);
+                    let obj = reconstruct(py, &expr);
+                    child_cache.insert(canon, obj.clone_ref(py));
+                    obj
+                });
+                let cost_val: f64 = cost_fn.call1(py, (node_py,))?.extract(py)?;
+                costs.push(cost_val);
+            }
+        }
+
+        let snapshot = IlpSnapshot {
+            e_m,
+            h_i,
+            g_i,
+            root_m,
+            costs,
+            m_id_map,
+            nodes,
+        };
+
+        Py::new(py, snapshot)
+    }
+
+    fn reconstruct_from_ilp(
+        &mut self,
+        py: Python,
+        snapshot: &IlpSnapshot,
+        solution: &PyAny,
+    ) -> PyResult<PyObject> {
+        let solved: Vec<i32> = solution.extract()?;
+        if solved.len() != snapshot.nodes.len() {
+            return Err(PyValueError::new_err("Solution length mismatch"));
+        }
+
+        let mut picked: HashMap<Id, PythonNode> = HashMap::new();
+        for (idx, val) in solved.iter().enumerate() {
+            if *val == 1 {
+                let class_idx = snapshot.g_i[idx];
+                let class_id = snapshot.m_id_map[class_idx];
+                let canon = self.egraph.find(class_id);
+                picked.insert(canon, snapshot.nodes[idx].clone());
+            }
+        }
+
+        fn build_expr(
+            py: Python,
+            id: Id,
+            egraph: &EGraph<PythonNode, PythonAnalysis>,
+            picked: &HashMap<Id, PythonNode>,
+            memo: &mut HashMap<Id, PyObject>,
+        ) -> PyResult<PyObject> {
+            let canon = egraph.find(id);
+            if let Some(obj) = memo.get(&canon) {
+                return Ok(obj.clone_ref(py));
+            }
+            let node = picked
+                .get(&canon)
+                .ok_or_else(|| PyValueError::new_err("Missing node for eclass"))?;
+            let obj = node.to_object(py, |child_id| {
+                build_expr(py, child_id, egraph, picked, memo).unwrap()
+            });
+            memo.insert(canon, obj.clone_ref(py));
+            Ok(obj)
+        }
+
+        let mut memo: HashMap<Id, PyObject> = HashMap::new();
+        let root_id = self.egraph.find(snapshot.m_id_map[snapshot.root_m]);
+        build_expr(py, root_id, &self.egraph, &picked, &mut memo)
     }
     fn pretty_dump(&self, py: Python) -> PyResult<String> {
         use egg::{AstSize, Extractor, Id};
@@ -320,7 +489,13 @@ impl PyEGraph {
                     .cast_as::<PyString>(py)
                     .ok()
                     .map(|s| s.to_str().unwrap_or("<?>").to_string())
-                    .unwrap_or_else(|| name_obj.as_ref(py).str().map(|s| s.to_str().unwrap_or("<?>").to_string()).unwrap_or_else(|_| "<?>".to_string()));
+                    .unwrap_or_else(|| {
+                        name_obj
+                            .as_ref(py)
+                            .str()
+                            .map(|s| s.to_str().unwrap_or("<?>").to_string())
+                            .unwrap_or_else(|_| "<?>".to_string())
+                    });
 
                 let tuple_len = |child_id: Id| -> Option<usize> {
                     let obj = reconstruct_child(child_id);
@@ -346,8 +521,12 @@ impl PyEGraph {
                                                         if let Ok(n) = op_obj.getattr("name") {
                                                             if let Ok(s) = n.str() {
                                                                 let t = s.to_str().unwrap_or("");
-                                                                if t.contains("arith.addf") { tokens.push("addf".to_string()); }
-                                                                if t.contains("arith.mulf") { tokens.push("mulf".to_string()); }
+                                                                if t.contains("arith.addf") {
+                                                                    tokens.push("addf".to_string());
+                                                                }
+                                                                if t.contains("arith.mulf") {
+                                                                    tokens.push("mulf".to_string());
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -362,12 +541,18 @@ impl PyEGraph {
                     tokens.sort();
                     tokens.dedup();
                     if tokens.is_empty() {
-                        out.push(format!("linalg.generic(args={}, regions={}, res={})", args_len, regions_len, results_len));
+                        out.push(format!(
+                            "linalg.generic(args={}, regions={}, res={})",
+                            args_len, regions_len, results_len
+                        ));
                     } else {
                         out.push(format!("linalg.generic{{body: {}}}", tokens.join("+")));
                     }
                 } else {
-                    out.push(format!("{} (args={}, res={})", name_s, args_len, results_len));
+                    out.push(format!(
+                        "{} (args={}, res={})",
+                        name_s, args_len, results_len
+                    ));
                 }
             } else if !ops_only {
                 // Fallback compact label

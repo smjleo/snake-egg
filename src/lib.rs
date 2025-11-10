@@ -13,6 +13,7 @@ use pyo3::{prelude::*, types::PyString};
 #[pymodule]
 fn _internal(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyEGraph>()?;
+    m.add_class::<IlpSnapshot>()?;
     m.add_class::<PyId>()?;
     m.add_class::<PyVar>()?;
     m.add_class::<PyPattern>()?;
